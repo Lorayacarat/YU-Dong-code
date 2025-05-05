@@ -1,0 +1,964 @@
+# 加载必要的包
+library(glmnet)
+library(caret)
+library(pROC)
+library(ggplot2)
+library(rms)
+library(dplyr)
+rm(list = ls())#清空环境
+# 读取数据 
+data <- read.csv("D:/R/analysis/data_all_reviewed.csv")
+
+# 提取自变量和因变量
+X <- data[, c("Sex.0.female.1.male.", "Age", "Height", "Weight", "BMI", 
+              "Smoking.0.No.1.Yes.", 
+              "T.Rt.diaphragmatic.motion..mm.", "T.Lt.diaphragmatic.motion..mm.", 
+              "T.Rt..Maximum.projected.lung.area.mm2.", "T.Lt..Maximum.projected.lung.area.mm2.", 
+              "T.Rt.Lt.Maximum.projected.lung.area.mm2.", "T.Rt..Minimum.projected.lung.area.mm2.", 
+              "T.Lt..Minimum.projected.lung.area.mm2.", "T.Rt.Lt..Minimum.projected.lung.area.mm2.", 
+              "T.Rt.projected.lung.area.change.rate....", "T.Lt.projected.lung.area.change.rate....", 
+              "T.Rt.Lt.projected.lung.area.change.rate....", "D.Rt.diaphragmatic.motion..mm.", 
+              "D.Lt.diaphragmatic.motion..mm.", "D.Rt..Maximum.projected.lung.area.mm2.", 
+              "D.Lt..Maximum.projected.lung.area.mm2.", "D.Rt.Lt.Maximum.projected.lung.area.mm2.", 
+              "D.Rt..Minimum.projected.lung.area.mm2.", "D.Lt..Minimum.projected.lung.area.mm2.", 
+              "D.Rt.Lt..Minimum.projected.lung.area.mm2.", "D.Rt.projected.lung.area.change.rate....", 
+              "D.Lt.projected.lung.area.change.rate....", "D.Rt.Lt.projected.lung.area.change.rate....")]
+
+y <- data$Group.0.normal.1.COPD.
+
+# 分割训练集和测试集
+set.seed(20241001)
+trainIndex <- createDataPartition(y, p = .7, list = FALSE, times = 1)
+X_train_original <- X[trainIndex, ]
+X_test_original <- X[-trainIndex, ]
+
+# Step 1: 对整个数据集 X 标准化
+#X_scaled <- scale(X)  # 使用全数据的均值和标准差进行标准化,造成数据泄露，不可
+X_train <- scale(X_train_original)  # 标准化后的训练集
+X_test <- scale(X_test_original)  # 标准化后的测试集
+# 创建 y_train 和 y_test
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+df_train <- data.frame(X_train_original, y = y_train)
+df_test <- data.frame(X_test_original, y = y_test)
+
+str(X_train)
+str(y_train)
+str(df_train)
+str(df_test)
+# ================================
+# 拟合 Lasso 回归模型(未定lambda值)
+# ================================
+fit <- glmnet(X_train, y_train, alpha = 1, family = "binomial")  # family 可以设置为 "gaussian", "binomial", "poisson" 等
+
+# 设置边框加粗和轴标签字体加粗，同时调整标签位置
+par(lwd = 2, font.lab = 2, cex.lab = 1.5, cex.axis = 1.2, mgp = c(2.7, 1, 0))  
+# mgp 参数控制轴标题和刻度线的位置
+
+# 生成回归系数路径图
+plot(
+  fit, 
+  xvar = "lambda", 
+  label = FALSE,               # 隐藏左侧变量编号
+  lwd = 2                      # 加粗线条
+)
+# 通过交叉验证选择最佳的 lambda 值
+cv_fit <- cv.glmnet(as.matrix(X_train), y_train, family = "binomial", alpha = 1)
+# 查看交叉验证误差图
+plot(cv_fit)
+
+
+# ================================
+#计算最好的两个lambda，提取系数
+# ================================
+
+# 提取 lambda.min 和 lambda.1se 值
+lambda_min <- cv_fit$lambda.min
+lambda_1se <- cv_fit$lambda.1se
+
+# 输出 lambda.min 下的系数
+coef_min <- coef(cv_fit, s = "lambda.min")
+cat("Lambda.min:", lambda_min, "\n")
+cat("Coefficients at lambda.min:\n")
+print(coef_min)
+
+# 输出 lambda.1se 下的系数
+coef_1se <- coef(cv_fit, s = "lambda.1se")
+cat("\nLambda.1se:", lambda_1se, "\n")
+cat("Coefficients at lambda.1se:\n")
+print(coef_1se)
+
+
+
+# 将 coef_1se 转换为普通矩阵
+coef_1se_matrix <- as.matrix(coef_1se)
+
+# 获取非零系数的变量名
+non_zero_features <- rownames(coef_1se_matrix)[coef_1se_matrix[, 1] != 0]
+str(non_zero_features)
+
+
+selected_features <- rownames(coef_1se)[coef_1se[, 1] != 0 & rownames(coef_1se) != "(Intercept)"]
+
+
+
+# 查看交叉验证误差图，标注两个最佳lambda值线
+plot(cv_fit)
+abline(v = log(cv_fit$lambda.min), col = "blue", lty = 2) # lambda.min 位置
+abline(v = log(cv_fit$lambda.1se), col = "red", lty = 2)  # lambda.1se 位置
+# 在图中标注 lambda.min 和 lambda.1se
+# 添加图例，标出 lambda.min 和 lambda.1se
+legend("topright", inset = c(0.01, 0.0025), 
+       legend = c("lambda.min", "lambda.1se"),
+       col = c("blue", "red"), lty = 2, box.lty = 0)
+
+# 基于筛选出的变量重新构建数据集
+X_train_selected <- X_train[, selected_features]
+X_train_selected <- as.data.frame(X_train_selected)
+X_test_selected <- X_test[, selected_features]
+X_test_selected <- as.data.frame(X_test_selected)
+
+summary(X_train_selected)
+summary(X_test_selected)
+
+# ================================
+####roc曲线版本1：可以和glmnet——lasso直接集成（废弃）
+# ================================
+if(FALSE)
+{
+  # ROC曲线与AUC计算
+  #roc_train <- roc(y_train, train_pred)
+  #roc_test <- roc(y_test, test_pred)
+  
+  
+  # 绘制 ROC 曲线并计算 AUC
+  probabilities_test <- as.vector(predict(cv_fit, newx = X_test, s = "lambda.1se", type = "response"))
+  
+  roc_test <- roc(y_test, probabilities_test)
+  
+  probabilities_train <- as.vector(predict(cv_fit, newx = X_train, s = "lambda.1se", type = "response"))
+  
+  roc_train <- roc(y_train, probabilities_train)
+  
+  
+  ci(roc_train)
+  ci(roc_test)
+  # 绘制ROC曲线
+  plot(roc_train, col = "blue", main = "ROC Curve")
+  plot(roc_test, col = "red", add = TRUE)
+  
+  # 计算AUC
+  auc_train <- auc(roc_train)
+  auc_test <- auc(roc_test)
+  
+  # 添加图例，并在图例中显示AUC值
+  legend("bottomright", 
+         legend = c(paste("AUC =", round(auc_train, 3)), 
+                    paste("AUC =", round(auc_test, 3))),
+         col = c("blue", "red"), lwd = 2)
+  
+  
+}
+
+
+
+
+
+
+# ================================
+######用rms 包中的 lrm模型
+# ================================
+
+df_train_selected <- df_train[, c("y", selected_features)]
+df_test_selected <- df_test[, c("y", selected_features)]
+##df_all_selected
+# 合并数据框
+#df_all_selected <- rbind(df_train_selected, df_test_selected)
+# 定义数据的分布信息
+dd <- datadist(df_train_selected)
+options(datadist = "dd")
+
+######## 拟合 Logistic 回归模型
+# 提取自变量列名称（去除响应变量 y）
+predictor_vars <- setdiff(colnames(df_train_selected), "y")
+
+# 自动构建公式
+formula <- as.formula(paste("y ~", paste(predictor_vars, collapse = " + ")))
+
+# 拟合 Logistic 回归模型
+fit_rms <- lrm(formula, data = df_train_selected, x = TRUE, y = TRUE)
+# ================================
+# 查看模型结果，包括估计系数、Z 值、P 值
+# ================================
+
+print(fit_rms)
+
+
+
+
+# ================================
+# 提取回归系数和标准误
+# ================================
+coef_estimates <- coef(fit_rms)  # 回归系数
+se <- sqrt(diag(vcov(fit_rms)))  # 标准误
+
+# 计算置信区间的下限和上限
+z_value <- 1.96  # 95% 置信水平的 z 值
+lower_ci <- coef_estimates - z_value * se
+upper_ci <- coef_estimates + z_value * se
+
+# ================================
+# 计算 OR 和 OR 的置信区间
+# ================================
+OR <- exp(coef_estimates)
+lower_or_ci <- exp(lower_ci)
+upper_or_ci <- exp(upper_ci)
+
+# 合并 OR 和置信区间
+OR_results <- cbind(OR, lower_or_ci, upper_or_ci)
+colnames(OR_results) <- c("Odds Ratio", "Lower 95% CI", "Upper 95% CI")
+
+# 查看 OR 和置信区间
+print(OR_results)
+
+# ================================
+#nomogram 函数，列线图绘制（废弃）
+# ================================
+if(FALSE)
+{
+  # 设置图形的边距，增大左边距
+  par(mar = c(5, 6, 4, 2) + 0.1)  # 增大左边距
+  
+  # 生成列线图对象，使用 paste 拼接公式字符串
+  nom <- nomogram(fit_rms, fun = plogis, fun.at = c(0.1, 0.5, 0.9), lp = FALSE)
+  
+  # 绘制列线图
+  plot(nom, xfrac = 0.5)
+  # 添加标题
+  title("rms-lrm-nomogram")
+}
+
+
+
+# ================================
+#########已废弃#使用 rms 包中的 validate 函数来计算 训练集C-统计量
+# ================================
+
+#不用校正方法
+if (FALSE)
+{
+  # 计算 Dxy
+  validation_results <- validate(fit_rms, method = "boot", B = 1000)
+  
+  # 提取 Dxy 并计算 C-统计量
+  Dxy <- validation_results['Dxy', 'index.corrected']  # 提取校正后的 Dxy 值
+  C_stat <- (Dxy + 1) / 2  # 计算 C-统计量
+  
+  # 输出 Dxy 和 C-统计量
+  cat("Dxy:", Dxy, "\n")
+  cat("训练集C-统计量 (C-index):", C_stat, "\n")
+}
+
+
+
+
+# ================================
+######### 使用 somers2() 计算训练集 C-统计量
+# ================================
+if(FALSE)
+{
+  # 生成训练集的预测概率
+  predicted_risk_train <- predict(fit_rms, newdata = df_train_selected, type = "fitted")
+  
+  # 使用 somers2() 计算训练集的 Somers' D 和 C-统计量
+  c_stat_train_somers <- somers2(predicted_risk_train, df_train_selected$y)
+  
+  # 输出 somers2() 的结果
+  cat("\n训练集 Somers' D 值:", c_stat_train_somers['Dxy'], "\n")
+  cat("训练集 C-统计量 (C-index):", c_stat_train_somers['C'], "\n")
+  
+  # ================================
+  ######### 使用 somers2() 计算测试集 C-统计量
+  # ================================
+  
+  # 生成测试集的预测概率
+  predicted_risk_test <- predict(fit_rms, newdata = df_test_selected, type = "fitted")
+  
+  # 使用 somers2() 计算测试集的 Somers' D 和 C-统计量
+  c_stat_test_somers <- somers2(predicted_risk_test, df_test_selected$y)
+  
+  # 输出 somers2() 的结果
+  cat("\n测试集 Somers' D 值:", c_stat_test_somers['Dxy'], "\n")
+  cat("测试集 C-统计量 (C-index):", c_stat_test_somers['C'], "\n")
+  
+}
+
+
+# ================================
+######### 训练集 C-统计量 Bootstrap 方法
+# ================================
+library(boot)
+library(rms)
+
+# 定义 Bootstrap 计算 C-统计量的函数
+c_statistic_bootstrap <- function(data, indices) {
+  # 重采样数据
+  d <- data[indices, ]
+  
+  # 重新计算预测概率
+  predicted <- predict(fit_rms, newdata = d, type = "fitted")
+  
+  # 计算 Somers' D 值并转换为 C-统计量
+  somers <- somers2(predicted, d$y)
+  return(somers["C"])
+}
+
+# 准备训练集数据
+train_data <- data.frame(y = df_train_selected$y, df_train_selected)
+
+# 使用 boot() 函数进行 Bootstrap
+set.seed(20241001)  # 设置随机种子以保证结果可重复
+bootstrap_train <- boot(data = train_data, statistic = c_statistic_bootstrap, R = 1000)
+
+# 提取 C-统计量均值和置信区间
+c_stat_train_mean <- mean(bootstrap_train$t)
+ci_train <- boot.ci(bootstrap_train, type = "perc")$percent[4:5]
+
+
+
+# ================================
+######### 测试集 C-统计量 Bootstrap 方法
+# ================================
+
+# 准备测试集数据
+test_data <- data.frame(y = df_test_selected$y, df_test_selected)
+
+# 使用 boot() 函数进行 Bootstrap
+bootstrap_test <- boot(data = test_data, statistic = c_statistic_bootstrap, R = 1000)
+
+# 提取 C-统计量均值和置信区间
+c_stat_test_mean <- mean(bootstrap_test$t)
+ci_test <- boot.ci(bootstrap_test, type = "perc")$percent[4:5]
+
+# 输出训练集结果
+cat("训练集 C-统计量 (Bootstrap):", c_stat_train_mean, "\n")
+cat("训练集 C-统计量 95% CI (Bootstrap):", ci_train, "\n\n")
+
+# 输出测试集结果
+cat("测试集 C-统计量 (Bootstrap):", c_stat_test_mean, "\n")
+cat("测试集 C-统计量 95% CI (Bootstrap):", ci_test, "\n")
+
+# ================================
+########使用 rms 包中的 calibrate 函数绘制train校准曲线
+# ================================
+
+# 校准模型（使用 1000 次 Bootstrap）
+cal_train <- calibrate(fit_rms, method = "boot", B = 1000)
+
+# 绘制校准曲线
+plot(
+  cal_train,
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  xlab = "Predicted Probability",
+  ylab = "Observed Probability",
+  cex.lab = 1.2,      # 坐标轴标签字体大小
+  cex.axis = 1,       # 坐标轴刻度字体大小
+  cex.main = 1.2,     # 主标题字体大小
+  cex.sub = 0.8,      # 副标题字体大小
+  legend = FALSE      # 不显示默认图例
+)
+
+# 添加 Bias-corrected 曲线（校正后的校准曲线）
+lines(
+  cal_train[, c("predy", "calibrated.corrected")],
+  type = 'l',          # 连线类型
+  lwd = 3,             # 线宽
+  col = "#2166AC"      # 校正曲线颜色
+)
+
+# 添加 Apparent 曲线（原始校准曲线）
+lines(
+  cal_train[, c("predy", "calibrated.orig")],
+  type = "l",
+  lwd = 3,             # 线宽
+  col = "tomato"       # 原始曲线颜色
+)
+
+# 添加理想线（Ideal Line）
+abline(
+  0, 1,
+  lty = 2,             # 对角线虚线
+  lwd = 2,             # 对角线线宽
+  col = "#224444"      # 对角线颜色
+)
+
+# 添加图例
+legend(
+  "bottomright",
+  legend = c("Apparent", "Bias-corrected", "Ideal"),
+  col = c("tomato", "#2166AC", "#224444"),
+  lty = c(1, 1, 2),
+  lwd = c(3, 3, 2),
+  bty = "n"            # 不绘制图例边框
+)
+
+# 添加标题
+title(main = "Calibration Curve: Train Set")
+
+
+
+# ================================
+#########使用 rms 包中的 calibrate 函数绘制test校准曲线
+# ================================
+# 首先获取测试集的预测值
+phat <- predict(fit_rms, newdata = df_test_selected, type = "fitted")
+df_test_selected$phat <- phat  # 将预测概率添加到测试集中
+
+# 在测试集中用预测值 phat 作为自变量，真实结果 y 作为因变量建立逻辑回归
+fit_test <- lrm(y ~ phat, data = df_test_selected, x = TRUE, y = TRUE)
+
+# 校准模型（使用 1000 次 Bootstrap）
+cal_test <- calibrate(fit_test, method = "boot", B = 1000)
+
+# 绘制校准曲线
+plot(
+  cal_test,
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  xlab = "Predicted Probability",
+  ylab = "Observed Probability",
+  cex.lab = 1.2,      # 坐标轴标签字体大小
+  cex.axis = 1,       # 坐标轴刻度字体大小
+  cex.main = 1.2,     # 主标题字体大小
+  cex.sub = 0.8,      # 副标题字体大小
+  legend = FALSE      # 不显示默认图例
+)
+
+# 添加 Bias-corrected 曲线（校正后的校准曲线）
+lines(
+  cal_test[, c("predy", "calibrated.corrected")],
+  type = 'l',          # 连线类型
+  lwd = 3,             # 线宽
+  col = "#2166AC"      # 校正曲线颜色
+)
+
+# 添加 Apparent 曲线（原始校准曲线）
+lines(
+  cal_test[, c("predy", "calibrated.orig")],
+  type = "l",
+  lwd = 3,             # 线宽
+  col = "tomato"       # 原始曲线颜色
+)
+
+# 添加理想线（Ideal Line）
+abline(
+  0, 1,
+  lty = 2,             # 对角线虚线
+  lwd = 2,             # 对角线线宽
+  col = "#224444"      # 对角线颜色
+)
+
+# 添加图例
+legend(
+  "bottomright",
+  legend = c("Apparent", "Bias-corrected", "Ideal"),
+  col = c("tomato", "#2166AC", "#224444"),
+  lty = c(1, 1, 2),
+  lwd = c(3, 3, 2),
+  bty = "n"            # 不绘制图例边框
+)
+
+# 添加标题
+title(main = "Calibration Curve: Test Set")
+
+# 恢复测试集原始数据框（删除 phat 列）
+df_test_selected <- df_test_selected %>% select(-phat)
+
+#已废弃，上面的方法可以实现
+if (FALSE){
+  # ================================
+  #########使用 rms 包中的 val.prob 函数绘制test校准曲线
+  # ================================
+  # 在测试集上生成预测概率
+  predicted_prob_test <- predict(fit_rms, newdata = df_test_selected, type = "fitted")
+  
+  # 使用测试集的实际标签
+  actual_outcome_test <- df_test_selected$y
+  
+  # 使用 val.prob 绘制测试集的校准曲线
+  val.prob(predicted_prob_test, actual_outcome_test, pl = TRUE)
+  # 添加标题
+  title("Calibration Curve: Test Set")
+  
+  # ================================
+  #########使用 rms 包中的 val.prob 函数绘制train校准曲线
+  # ================================
+  # 在测试集上生成预测概率
+  predicted_prob_train <- predict(fit_rms, newdata = df_train_selected, type = "fitted")
+  
+  # 使用测试集的实际标签
+  actual_outcome_train <- df_train_selected$y
+  
+  # 使用 val.prob 绘制测试集的校准曲线
+  val.prob(predicted_prob_train, actual_outcome_train, pl = TRUE)
+  
+  # 添加标题
+  title("Calibration Curve: Train Set")
+}
+
+if (FALSE)
+{
+  # ================================
+  #############决策曲线绘制
+  # ================================
+  # 加载 rmda 包
+  library(rmda)
+  
+  # Step 1: 定义数据的分布信息，以支持 rms 包的其他功能
+  dd_dca <- datadist(df_train_selected)
+  options(datadist = "dd_dca")
+  
+  # Step 2: 使用 rms 包中的 lrm 函数拟合 Logistic 回归模型
+  # 提取自变量列名称（去除响应变量 y）
+  predictor_vars_dca <- setdiff(colnames(df_train_selected), "y")
+  
+  # 自动构建公式
+  formula_dca <- as.formula(paste("y ~", paste(predictor_vars_dca, collapse = " + ")))
+  
+  # 使用 rms 包中的 lrm 函数拟合 Logistic 回归模型
+  fit_rms_dca <- lrm(formula_dca, data = df_train_selected, x = TRUE, y = TRUE)
+  # Step 3: 生成新的数据框用于存储预测风险
+  df_train_dca <- df_train_selected
+  df_test_dca <- df_test_selected
+  
+  # 计算训练集和测试集上的预测风险
+  df_train_dca$predicted_risk <- predict(fit_rms_dca, newdata = df_train_dca, type = "fitted")
+  df_test_dca$predicted_risk <- predict(fit_rms_dca, newdata = df_test_dca, type = "fitted")
+  
+  # Step 4: 使用 rmda 包的 decision_curve 函数计算 DCA 曲线
+  # 训练集 DCA
+  dca_train <- decision_curve(
+    y ~ predicted_risk, 
+    data = df_train_dca, 
+    fitted.risk = TRUE,  # 已提供预测风险值，不需重新拟合模型
+    thresholds = seq(0, 1, by = 0.05),  # 设置阈值范围
+    confidence.intervals = 0.95,  # 计算 95% 置信区间
+    bootstraps = 500  # 使用 500 次 bootstrap 计算置信区间
+  )
+  str(dca_train)
+  # 测试集 DCA
+  dca_test <- decision_curve(
+    y ~ predicted_risk, 
+    data = df_test_dca, 
+    fitted.risk = TRUE, 
+    thresholds = seq(0, 1, by = 0.05),
+    confidence.intervals = 0.95,
+    bootstraps = 500
+  )
+  
+  # Step 5: 绘制决策曲线，将训练集和测试集的曲线绘制在同一张图上
+  
+  # 绘制训练集的决策曲线
+  plot_decision_curve(
+    x = list(dca_train), 
+    curve.names = c("Training Set"), 
+    cost.benefit.axis = TRUE,        # 显示代价-效益轴
+    n.cost.benefits = 6,             # 设置代价-效益刻度数
+    standardize = TRUE,              # 标准化曲线
+    #confidence.intervals = 0.95,     # 绘制 95% 置信区间
+    col = "blue",                    # 设置训练集曲线颜色
+    lty = 1,                         # 设置线型，1 为实线
+    lwd = 2,                         # 设置线宽
+    xlim = c(0, 1),                  # 设置 X 轴范围
+    ylim = c(-0.05, 1),            # 设置 Y 轴范围
+    xlab = "Threshold Probability",  # 自定义 X 轴标签
+    ylab = "Net Benefit",            # 自定义 Y 轴标签
+    legend.position = "topright"     # 图例位置
+  )
+  
+  # 绘制测试集的决策曲线
+  plot_decision_curve(
+    x = list(dca_test), 
+    curve.names = c("Test Set"), 
+    cost.benefit.axis = TRUE,        # 显示代价-效益轴
+    n.cost.benefits = 6,             # 设置代价-效益刻度数
+    standardize = TRUE,              # 标准化曲线
+    #confidence.intervals = 0.95,     # 绘制 95% 置信区间
+    col = "red",                     # 设置测试集曲线颜色
+    lty = 1,                         # 设置线型，2 为虚线
+    lwd = 2,                         # 设置线宽
+    xlim = c(0, 1),                  # 设置 X 轴范围
+    ylim = c(-0.05, 1),            # 设置 Y 轴范围
+    xlab = "Threshold Probability",  # 自定义 X 轴标签
+    ylab = "Net Benefit",            # 自定义 Y 轴标签
+    legend.position = "topright"     # 图例位置
+  )
+  
+  
+  
+  # 绘制决策曲线，将训练集和测试集的曲线绘制在同一张图上
+  plot_decision_curve(
+    x = list(dca_train, dca_test), 
+    curve.names = c("Training Set", "Test Set"), 
+    cost.benefit.axis = TRUE,  # 显示代价-效益轴
+    n.cost.benefits = 6,       # 设置代价-效益刻度数
+    standardize = TRUE,        # 标准化曲线
+    confidence.intervals = 0.95,  # 绘制 95% 置信区间
+    col = c("blue", "red"),    # 设置训练集和测试集的曲线颜色
+    lty = c(1, 2),             # 设置线型，1 为实线，2 为虚线
+    lwd = 2,                   # 设置线宽
+    xlim = c(0, 1),            # 设置 X 轴范围
+    ylim = c(-0.05, 1),      # 设置 Y 轴范围
+    xlab = "Threshold Probability",  # 自定义 X 轴标签
+    ylab = "Net Benefit",           # 自定义 Y 轴标签
+    legend.position = "topright"     # 图例位置
+  )
+}
+# ================================
+#############决策曲线绘制
+# ================================
+# 加载 rmda 包
+library(rmda)
+
+# Step 1: 定义数据的分布信息，以支持 rms 包的其他功能
+dd_dca <- datadist(df_train_selected)
+options(datadist = "dd_dca")
+
+# Step 2: 使用 rms 包中的 lrm 函数拟合 Logistic 回归模型
+# 提取自变量列名称（去除响应变量 y）
+predictor_vars_dca <- setdiff(colnames(df_train_selected), "y")
+
+# 自动构建公式
+formula_dca <- as.formula(paste("y ~", paste(predictor_vars_dca, collapse = " + ")))
+
+# 使用 rms 包中的 lrm 函数拟合 Logistic 回归模型
+fit_rms_dca <- lrm(formula_dca, data = df_train_selected, x = TRUE, y = TRUE)
+
+# Step 3: 生成新的数据框用于存储预测风险
+df_train_dca <- df_train_selected
+df_test_dca <- df_test_selected
+
+# 计算训练集和测试集上的预测风险
+df_train_dca$predicted_risk <- predict(fit_rms_dca, newdata = df_train_dca, type = "fitted")
+df_test_dca$predicted_risk <- predict(fit_rms_dca, newdata = df_test_dca, type = "fitted")
+
+# Step 4: 使用 rmda 包的 decision_curve 函数计算 DCA 曲线
+# 训练集 DCA
+dca_train <- decision_curve(
+  y ~ predicted_risk, 
+  data = df_train_dca, 
+  fitted.risk = TRUE,  # 已提供预测风险值，不需重新拟合模型
+  thresholds = seq(0, 1, by = 0.01),  # 设置阈值范围
+  confidence.intervals = FALSE,  # 不计算置信区间
+  bootstraps = 0  # 不使用 Bootstrap
+)
+
+# 测试集 DCA
+dca_test <- decision_curve(
+  y ~ predicted_risk, 
+  data = df_test_dca, 
+  fitted.risk = TRUE, 
+  thresholds = seq(0, 1, by = 0.01),
+  confidence.intervals = FALSE,  # 不计算置信区间
+  bootstraps = 0  # 不使用 Bootstrap
+)
+
+# Step 5: 绘制决策曲线，仅保留决策曲线本身
+# 绘制训练集的决策曲线
+plot_decision_curve(
+  x = list(dca_train), 
+  curve.names = c("Nomogram"), 
+  cost.benefit.axis = TRUE,        # 显示代价-效益轴
+  n.cost.benefits = 6,             # 设置代价-效益刻度数
+  standardize = TRUE,              # 标准化曲线
+  #confidence.intervals = 0.95,     # 绘制 95% 置信区间
+  col = "blue",                    # 设置训练集曲线颜色
+  lty = 1,                         # 设置线型，1 为实线
+  lwd = 2,                         # 设置线宽
+  xlim = c(0, 1),                  # 设置 X 轴范围
+  ylim = c(-0.05, 1),            # 设置 Y 轴范围
+  xlab = "Threshold Probability",  # 自定义 X 轴标签
+  ylab = "Net Benefit",            # 自定义 Y 轴标签
+  legend.position = "topright"     # 图例位置
+)
+
+# 绘制测试集的决策曲线
+plot_decision_curve(
+  x = list(dca_test), 
+  curve.names = c("Nomogram"), 
+  cost.benefit.axis = TRUE,        # 显示代价-效益轴
+  n.cost.benefits = 6,             # 设置代价-效益刻度数
+  standardize = TRUE,              # 标准化曲线
+  #confidence.intervals = 0.95,     # 不绘制 95% 置信区间
+  col = "red",                     # 设置测试集曲线颜色
+  lty = 1,                         # 设置线型，2 为虚线
+  lwd = 2,                         # 设置线宽
+  xlim = c(0, 1),                  # 设置 X 轴范围
+  ylim = c(-0.05, 1),            # 设置 Y 轴范围
+  xlab = "Threshold Probability",  # 自定义 X 轴标签
+  ylab = "Net Benefit",            # 自定义 Y 轴标签
+  legend.position = "topright"     # 图例位置
+)
+plot_decision_curve(
+  x = list(dca_train, dca_test), 
+  curve.names = c("Training Set", "Test Set"), 
+  cost.benefit.axis = TRUE,  # 显示代价-效益轴
+  n.cost.benefits = 6,       # 设置代价-效益刻度数
+  standardize = TRUE,        # 标准化曲线
+  confidence.intervals = FALSE,  # 不绘制 95% 置信区间
+  col = c("blue", "red"),    # 设置 Training 和 Test 的曲线颜色
+  lty = c(1, 1),             # 线型，1 表示实线
+  lwd = 2,                   # 设置线宽
+  xlim = c(0, 1),            # 设置 X 轴范围
+  ylim = c(-0.05, 1),        # 设置 Y 轴范围
+  xlab = "Threshold Probability",  # 自定义 X 轴标签
+  ylab = "Net Benefit",           # 自定义 Y 轴标签
+  legend.position = "topright"     # 图例位置
+)
+# 保存训练集和测试集的 decision_curve 对象
+saveRDS(dca_train, "C:/Users/ZXC/Desktop/dca_train_combined.rds")
+saveRDS(dca_test, "C:/Users/ZXC/Desktop/dca_test_combined.rds")
+
+# ================================
+###训练集曲线交点标记
+# ================================
+str(dca_train)
+dca_train_derived_data <- dca_train$derived.data
+str(dca_train_derived_data)
+
+# 找到 model 列为 "All" 时首次 NB 为负数时的 thresholds
+threshold_all_negative <- dca_train_derived_data %>%
+  filter(model == "All", NB < 0) %>%
+  slice(1) %>%
+  pull(thresholds)
+
+# 找到 model 列为 "y ~ predicted_risk" 时首次 NB 为负数时的 thresholds
+threshold_predicted_negative <- dca_train_derived_data %>%
+  filter(model == "y ~ predicted_risk", NB < 0) %>%
+  slice(1) %>%
+  pull(thresholds)
+
+# 列举所有 thresholds 值，使 model 列的值为 "y ~ predicted_risk" 时 NB 的值比 model 列的值为 "All" 时 NB 的值小
+comparison_thresholds <- dca_train_derived_data %>%
+  filter(model == "y ~ predicted_risk") %>%
+  inner_join(
+    dca_train_derived_data %>%
+      filter(model == "All") %>%
+      select(thresholds, NB) %>%
+      rename(NB_all = NB),
+    by = "thresholds"
+  ) %>%
+  filter(NB < NB_all) %>%
+  select(thresholds)
+# 输出结果
+print(threshold_all_negative)
+print(threshold_predicted_negative)
+print(comparison_thresholds)
+
+# ================================
+###测试集曲线交点标记
+# ================================
+
+# 假设 dca_test 的结构类似 dca_train，先提取其 derived.data 部分
+dca_test_derived_data <- dca_test$derived.data
+
+# 找到 model 列为 "All" 时首次 NB 为负数时的 thresholds
+threshold_all_negative_test <- dca_test_derived_data %>%
+  filter(model == "All", NB < 0) %>%
+  slice(1) %>%
+  pull(thresholds)
+# 列举所有 thresholds 值，使 model 列的值为 "y ~ predicted_risk" 时 NB 的值比 model 列的值为 "All" 时 NB 的值小
+comparison_thresholds_test <- dca_test_derived_data %>%
+  filter(model == "y ~ predicted_risk") %>%
+  inner_join(
+    dca_test_derived_data %>%
+      filter(model == "All") %>%
+      select(thresholds, NB) %>%
+      rename(NB_all = NB),
+    by = "thresholds"
+  ) %>%
+  filter(NB < NB_all) %>%
+  select(thresholds)
+# 输出结果
+print(threshold_all_negative_test)
+print(comparison_thresholds_test)
+
+
+# ================================
+######绘制rms-lrm的ROC曲线
+# ================================
+
+# 1. 加载 pROC 包
+library(pROC)
+
+# 2. 获取预测概率
+prob_train <- predict(fit_rms, newdata = df_train_selected, type = "fitted")
+prob_test <- predict(fit_rms, newdata = df_test_selected, type = "fitted")
+
+# 3. 计算 ROC 和 AUC
+roc_train <- roc(df_train_selected$y, prob_train)
+roc_test <- roc(df_test_selected$y, prob_test)
+
+# 4. 绘制 ROC 曲线
+plot(roc_train, col = "blue", main = "ROC Curve for Logistic Model", lwd = 2,legacy.axes = TRUE)
+plot(roc_test, col = "red", add = TRUE, lwd = 2,legacy.axes = TRUE)
+
+# 5. 添加 AUC 和 95% 置信区间到图例
+ci_train <- ci.auc(roc_train)
+ci_test <- ci.auc(roc_test)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste0("AUC = ", round(auc(roc_train), 3), 
+           " (95% CI: ", round(ci_train[1], 3), "-", round(ci_train[3], 3), ")"),
+    paste0("AUC = ", round(auc(roc_test), 3), 
+           " (95% CI: ", round(ci_test[1], 3), "-", round(ci_test[3], 3), ")")
+  ),
+  col = c("blue", "red"),
+  lwd = 2
+)
+
+# 绘制训练集 ROC 曲线
+plot(
+  roc_train, 
+  col = "blue", 
+  main = "ROC Curve for Logistic Model (Train)", 
+  lwd = 2,
+  legacy.axes = TRUE         # 使用 1-Specificity 作为横坐标
+)
+legend(
+  "bottomright",
+  legend = paste0(
+    "AUC = ", round(auc(roc_train), 3), 
+    " (95% CI: ", round(ci_train[1], 3), "-", round(ci_train[3], 3), ")"
+  ),
+  col = "blue",
+  lwd = 2
+)
+
+# 绘制测试集 ROC 曲线
+plot(
+  roc_test, 
+  col = "red", 
+  main = "ROC Curve for Logistic Model (Test)", 
+  lwd = 2,
+  legacy.axes = TRUE         # 使用 1-Specificity 作为横坐标
+)
+legend(
+  "bottomright",
+  legend = paste0(
+    "AUC = ", round(auc(roc_test), 3), 
+    " (95% CI: ", round(ci_test[1], 3), "-", round(ci_test[3], 3), ")"
+  ),
+  col = "red",
+  lwd = 2
+)
+# 保存和读取所需的目录
+save_dir <- "C:/Users/ZXC/Desktop/"
+
+# 保存训练集 ROC 对象
+saveRDS(roc_train, file = paste0(save_dir, "roc_train_lasso-combined.rds"))
+
+# 保存测试集 ROC 对象
+saveRDS(roc_test, file = paste0(save_dir, "roc_test_lasso-combined.rds"))
+# 6. 计算最佳阈值、灵敏度、特异度、PPV、NPV 和准确度
+# 训练集
+coords_train <- coords(roc_train, "best", ret = c("threshold", "specificity", "sensitivity"))
+best_threshold_train <- coords_train$threshold
+predicted_train <- ifelse(prob_train >= best_threshold_train, 1, 0)
+confusion_train <- table(Predicted = predicted_train, Actual = df_train_selected$y)
+
+sensitivity_train <- confusion_train[2, 2] / sum(confusion_train[, 2])  # TP / (TP + FN)
+specificity_train <- confusion_train[1, 1] / sum(confusion_train[, 1])  # TN / (TN + FP)
+PPV_train <- confusion_train[2, 2] / sum(confusion_train[2, ])          # TP / (TP + FP)
+NPV_train <- confusion_train[1, 1] / sum(confusion_train[1, ])          # TN / (TN + FN)
+accuracy_train <- sum(diag(confusion_train)) / sum(confusion_train)     # (TP + TN) / Total
+
+# 测试集
+coords_test <- coords(roc_test, "best", ret = c("threshold", "specificity", "sensitivity"))
+best_threshold_test <- coords_test$threshold
+predicted_test <- ifelse(prob_test >= best_threshold_test, 1, 0)
+confusion_test <- table(Predicted = predicted_test, Actual = df_test_selected$y)
+
+sensitivity_test <- confusion_test[2, 2] / sum(confusion_test[, 2])  # TP / (TP + FN)
+specificity_test <- confusion_test[1, 1] / sum(confusion_test[, 1])  # TN / (TN + FP)
+PPV_test <- confusion_test[2, 2] / sum(confusion_test[2, ])          # TP / (TP + FP)
+NPV_test <- confusion_test[1, 1] / sum(confusion_test[1, ])          # TN / (TN + FN)
+accuracy_test <- sum(diag(confusion_test)) / sum(confusion_test)     # (TP + TN) / Total
+
+# 7. 创建 summary_table
+summary_table <- data.frame(
+  Dataset = c("Train", "Test"),
+  AUC = c(auc(roc_train), auc(roc_test)),
+  Best_Cutoff = c(best_threshold_train, best_threshold_test),
+  Sensitivity = c(sensitivity_train, sensitivity_test),
+  Specificity = c(specificity_train, specificity_test),
+  PPV = c(PPV_train, PPV_test),
+  NPV = c(NPV_train, NPV_test),
+  Accuracy = c(accuracy_train, accuracy_test)
+)
+
+# 打印 summary_table
+print(summary_table)
+
+# 设置导出路径
+file_path <- "C:/Users/ZXC/Desktop/summary_table.xlsx"
+
+# 将数据框写入 Excel 文件
+write.xlsx(summary_table, file = file_path)
+# ================================
+######绘制新版列线图，数据有修改
+# ================================
+
+df_train_selected <- df_train[, c("y", selected_features)]
+df_test_selected <- df_test[, c("y", selected_features)]
+##df_all_selected
+# 合并数据框
+#df_all_selected <- rbind(df_train_selected, df_test_selected)
+# 定义数据的分布信息
+dd <- datadist(df_train_selected)
+options(datadist = "dd")
+str(df_train_selected)
+
+
+# 将 Smoking.0.No.1.Yes. 转换为分类变量
+df_train_selected$`Smoking.0.No.1.Yes.` <- factor(
+  df_train_selected$`Smoking.0.No.1.Yes.`,
+  levels = c(0, 1),
+  labels = c("No", "Yes")
+)
+
+# 修改变量标签
+label(df_train_selected$`Smoking.0.No.1.Yes.`) <- "Smoking(Yes/No)"
+#label(df_train_selected$Smoking.Index) <- "Smoking Index"
+label(df_train_selected$`D.Rt.Lt.projected.lung.area.change.rate....`) <- "D- Rt+Lt △PLA (%)"
+######## 拟合 rms Logistic 回归模型
+# 提取自变量列名称（去除响应变量 y）
+predictor_vars <- setdiff(colnames(df_train_selected), "y")
+
+# 自动构建公式
+formula <- as.formula(paste("y ~", paste(predictor_vars, collapse = " + ")))
+
+# 拟合 Logistic 回归模型
+fit_rms <- lrm(formula, data = df_train_selected, x = TRUE, y = TRUE)
+
+# ================================
+#nomogram 函数，列线图绘制
+# ================================
+# 设置图形的边距，增大左边距
+par(mar = c(5, 4, 4, 2) + 0.1)  # 增大左边距
+
+# 生成列线图对象，使用 paste 拼接公式字符串
+nom <- nomogram(fit_rms, fun = plogis, fun.at = c(0.1, 0.5, 0.9), lp = FALSE)
+
+# 绘制列线图
+plot(nom, xfrac = 0.5)
+# 添加标题
+title("rms-lrm-nomogram")
+
+########画完图后恢复原来的格式
+df_train_selected <- df_train[, c("y", selected_features)]
+df_test_selected <- df_test[, c("y", selected_features)]
+
