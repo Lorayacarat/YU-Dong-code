@@ -91,7 +91,7 @@ str(data)
 # 分割数据
 if(FALSE)
 {
-  set.seed(20241226)
+  set.seed(20241001)
   trainIndex <- createDataPartition(data$`COPD VS non-COPD`, p = 0.7, list = FALSE, times = 1)
   
   data_train <- data[trainIndex, ]  # 训练集
@@ -135,7 +135,7 @@ y <- data$`COPD VS non-COPD`
 
 
 # 分割训练集和测试集，原始数据加original后缀
-set.seed(20241226)
+set.seed(20241001)
 trainIndex <- createDataPartition(y, p = .7, list = FALSE, times = 1)
 X_train_original <- X[trainIndex, ]
 X_test_original <- X[-trainIndex, ]
